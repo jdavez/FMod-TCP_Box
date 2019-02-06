@@ -13,7 +13,7 @@ class FModTCPBoxPy:
         "VOLTAGE": (0x07, 4) ,
         "WARNING": (0x08, 4) ,
 
-        # Bank 1": Communication
+        # Bank 1 : Communication
         "COMOPTIONS": (0x10, 4) ,
         "MAC": (0x11, 6) ,
         "IP":  (0x12, 4) ,
@@ -24,12 +24,12 @@ class FModTCPBoxPy:
         "I2CSPDCONFIG": (0x18, 1) ,
         "NUMBEROFUSERS": (0x1A, 1) ,
 
-        # Bank 2": External ports
+        # Bank 2 : External ports
         "INANALOGTHRESHOLD": (0x20, 4) ,
         "OUTPUTS": (0x21, 2) ,
         "INPUTS":  (0x23, 2) ,
 
-        # Bank 3": AD0-15 
+        # Bank 3 : AD0-15 
         "AD0VALUE": (0x30, 4), 
         "AD1VALUE": (0x31, 4),
         "AD2VALUE": (0x32, 4),
@@ -47,6 +47,11 @@ class FModTCPBoxPy:
         "ADEVALUE": (0x3E, 4),
         "ADFVALUE": (0x3F, 4)
     }
+    FuncID = { "Read": [0x00, 0x21],
+               "ReadAns": [0x00, 0x23],
+               "Write": [0x00, 0x22],
+               "WriteAns": [0x00, 0x24]
+    }
 
     def __init__(self, IP="169.254.5.5"):
         self.serverIP = IP 
@@ -54,6 +59,7 @@ class FModTCPBoxPy:
         self.serverUartPort = 8000      # RS232
         self.pktID = 0x0 
 
+        self.regnum = dict([[v[0], (k, v[1])] for k, v in self.REG.items()])
         self.expectedRecvBytes = 0
 
     def calcChecksum(self, ByteStream):
@@ -73,23 +79,42 @@ class FModTCPBoxPy:
         numreg = len(regs)
         id = self.pktID
         self.pktID = id + 1
-        pkt = [0, 0x21, ((id&0xff00)>>8), (id&0x00ff), numreg>>8, numreg&0xff] 
+        pkt = self.FuncID["Read"] + [((id&0xff00)>>8), (id&0x00ff), numreg>>8, numreg&0xff] 
         self.expectedRecvBytes = 8
         for a in regs:
             pkt = pkt + [self.REG[a.upper()][0]]
             self.expectedRecvBytes = self.expectedRecvBytes + self.REG[a.upper()][1] + 1
         cksum = self.calcChecksum(pkt)
         self.sock.send(bytearray(pkt+cksum))
-        # Read Reg ans [0x00, 0x23, ID_hi, ID_lo, Num_Byte_hi, Num_Byte_lo, Reg_Addr, Reg_Val, ..., chksum_hi, chksum_lo]
         ans = self.sock.recv(self.expectedRecvBytes)
         return ans 
 
+    # Read Reg ans [0x00, 0x23, ID_hi, ID_lo, Num_Byte_hi, Num_Byte_lo, Reg_Addr, Reg_Val, ..., chksum_hi, chksum_lo]
+    # Write Reg ans [0x00, 0x24, ID_hi, ID_lo, 0x00, 0x00, chksum_hi, chksum_lo]
+    def parseAns(self, ansPkt):
+        pkt = [ord(x) for x in ansPkt]
+        nbytes = (pkt[4]<<8) | pkt[5]
+        funcId = (pkt[0]<<8) | pkt[1]
+        ans =  {"FuncID": funcId, 
+                "XID": (pkt[2]<<8) | pkt[3],
+                "NBytes": nbytes } 
+        n = 6
+        while n < nbytes + 6 : 
+            reg_addr = pkt[n]
+            n = n+1
+            reg_name = self.regnum[reg_addr][0]
+            reg_val = pkt[n:n+self.regnum[reg_addr][1]]
+            n = n+self.regnum[reg_addr][1]
+            ans.update({reg_name: reg_val})
+            
+        return ans
+        
     # [0x00, 0x22, ID_hi, ID_lo, Num_Bytes_hi, Num_Bytes_lo, Reg_Addr, Reg_val ... chksum_hi, chksum_lo]
     # reg = [ [reg_name, reg_val1, reg_val2 ..], ...]
     def writeReg(self, regs):
         id = self.pktID
         self.pktID = id + 1
-        pkt = [0, 0x22, (id&0xff00)>>8, id&0xff, 0, 0]
+        pkt = self.FuncID["Write"] + [(id&0xff00)>>8, id&0xff, 0, 0]
         num_bytes = 0
         for r in regs:
             pkt = pkt + [ self.REG[r[0].upper()][0] ] + r[1:]
@@ -98,7 +123,6 @@ class FModTCPBoxPy:
         pkt[5] = num_bytes&0xff
         cksum = self.calcChecksum(pkt)
         self.sock.send(bytearray(pkt+cksum))
-        # Write Reg ans [0x00, 0x24, ID_hi, ID_lo, 0x00, 0x00, chksum_hi, chksum_lo]
         ans = self.sock.recv(8)
         return ans 
 
@@ -109,18 +133,22 @@ class FModTCPBoxPy:
     def disconnect(self):
         self.sock.close()
 
+
 if __name__ == '__main__':
 
     fmodbox = FModTCPBoxPy()
     fmodbox.connect()
     
     pkt = fmodbox.readReg(["type", "version", "mac", "ip", "name", "voltage", "outputs"])
-    print "recv ", [hex(ord(x)) for x in pkt]
+    print "recv: ", fmodbox.parseAns(pkt)
     
     pkt = fmodbox.writeReg([["outputs", 0x0F, 0xF0]])
-    print "recv ", [hex(ord(x)) for x in pkt]
+    print "recv: ", fmodbox.parseAns(pkt)
     
     pkt = fmodbox.readReg(["outputs"])
-    print "recv ", [hex(ord(x)) for x in pkt]
+    print "recv: ", fmodbox.parseAns(pkt)
     
+    pkt = fmodbox.readReg(["ad0value", "ad1value", "ad2value", "ad3value", "ad4value", "ad5value", "ad6value", "ad7value", "ad8value", "ad9value", "adavalue", "adbvalue", "adcvalue", "addvalue", 'adevalue', 'adfvalue'])
+    print "recv: ", fmodbox.parseAns(pkt)
+
     fmodbox.disconnect()
